@@ -5,6 +5,7 @@
 #if canImport(Combine)
 
 import Combine
+import Foundation
 
 public extension Optional.Pond where Wrapped == Any {
 
