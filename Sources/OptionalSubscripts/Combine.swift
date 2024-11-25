@@ -88,29 +88,29 @@ public struct AsyncSequencePublisher<S: AsyncSequence>: Combine.Publisher {
                 guard let self else {
                     return
                 }
-                var iterator = lock.withLock { sequence.makeAsyncIterator() }
-                while lock.withLock({ !isCancelled && demand > 0 }) {
+                var iterator = lock.withLock { self.sequence.makeAsyncIterator() }
+                while lock.withLock({ !self.isCancelled && self.demand > 0 }) {
                     let element: S.Element?
                     do {
                         element = try await iterator.next()
                     } catch is CancellationError {
-                        lock.withLock { subscriber }.receive(completion: .finished)
+                        lock.withLock { self.subscriber }.receive(completion: .finished)
                         return
                     } catch let error as Failure {
-                        lock.withLock { subscriber }.receive(completion: .failure(error))
+                        lock.withLock { self.subscriber }.receive(completion: .failure(error))
                         throw CancellationError()
                     } catch {
                         assertionFailure("Expected \(Failure.self) but got \(type(of: error))")
                         throw CancellationError()
                     }
                     guard let element else {
-                        lock.withLock { subscriber }.receive(completion: .finished)
+                        lock.withLock { self.subscriber }.receive(completion: .finished)
                         throw CancellationError()
                     }
                     try Task.checkCancellation()
-                    lock.withLock { demand -= 1 }
-                    let newDemand = lock.withLock { subscriber }.receive(element)
-                    lock.withLock { demand += newDemand }
+                    lock.withLock { self.demand -= 1 }
+                    let newDemand = lock.withLock { self.subscriber }.receive(element)
+                    lock.withLock { self.demand += newDemand }
                     await Task.yield()
                 }
                 task = nil
@@ -121,6 +121,12 @@ public struct AsyncSequencePublisher<S: AsyncSequence>: Combine.Publisher {
             lock.withLock {
                 task?.cancel()
                 isCancelled = true
+            }
+        }
+
+        deinit {
+            lock.withLock {
+                task?.cancel()
             }
         }
     }
