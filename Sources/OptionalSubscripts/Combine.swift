@@ -84,10 +84,7 @@ public struct AsyncSequencePublisher<S: AsyncSequence>: Combine.Publisher {
             lock.withLock { demand = __demand }
             guard task == nil else { return }
             lock.lock(); defer { lock.unlock() }
-            task = Task { [weak self] in
-                guard let self else {
-                    return
-                }
+            task = Task { [self] in
                 var iterator = lock.withLock { self.sequence.makeAsyncIterator() }
                 while lock.withLock({ !self.isCancelled && self.demand > 0 }) {
                     let element: S.Element?
@@ -127,6 +124,7 @@ public struct AsyncSequencePublisher<S: AsyncSequence>: Combine.Publisher {
         deinit {
             lock.withLock {
                 task?.cancel()
+                isCancelled = true
             }
         }
     }
