@@ -67,7 +67,7 @@ public struct AsyncSequencePublisher<S: AsyncSequence>: Combine.Publisher {
     >: Combine.Subscription where Subscriber.Input == Output, Subscriber.Failure == Failure {
 
         private var sequence: S
-        private var subscriber: Subscriber?
+        private var subscriber: Subscriber
         private var isCancelled = false
 
         private var lock = NSRecursiveLock()
@@ -84,73 +84,47 @@ public struct AsyncSequencePublisher<S: AsyncSequence>: Combine.Publisher {
             lock.withLock { demand = __demand }
             guard task == nil else { return }
             lock.lock(); defer { lock.unlock() }
-            task = Task { [weak self] in
-                guard let self = self else { return }
-                var iterator = self.lock.withLock { self.sequence.makeAsyncIterator() }
-                while self.lock.withLock({ !self.isCancelled && self.demand > 0 }) {
+            task = Task { [self] in
+                var iterator = lock.withLock { self.sequence.makeAsyncIterator() }
+                while lock.withLock({ !self.isCancelled && self.demand > 0 }) {
+                    let element: S.Element?
                     do {
-                        let element = try await iterator.next()
-                        guard let element = element else {
-                            self.finishAndCleanUp()
-                            return
-                        }
-
-                        try Task.checkCancellation()
-
-                        self.lock.withLock { self.demand -= 1 }
-                        let newDemand = self.lock.withLock {
-                            self.subscriber?.receive(element) ?? .none
-                        }
-
-                        self.lock.withLock {
-                            self.demand += newDemand
-                        }
-
-                        await Task.yield()
-
+                        element = try await iterator.next()
                     } catch is CancellationError {
-                        self.finishAndCleanUp()
+                        lock.withLock { self.subscriber }.receive(completion: .finished)
                         return
+                    } catch let error as Failure {
+                        lock.withLock { self.subscriber }.receive(completion: .failure(error))
+                        throw CancellationError()
                     } catch {
-                        // Since Failure == Never, we didn't expect an error here.
-                        // Just finish and clean up, as we can't send a failure.
-                        Swift.print("Unexpected error encountered: \(error)")
-                        self.finishAndCleanUp()
-                        return
+                        assertionFailure("Expected \(Failure.self) but got \(type(of: error))")
+                        throw CancellationError()
                     }
+                    guard let element else {
+                        lock.withLock { self.subscriber }.receive(completion: .finished)
+                        throw CancellationError()
+                    }
+                    try Task.checkCancellation()
+                    lock.withLock { self.demand -= 1 }
+                    let newDemand = lock.withLock { self.subscriber }.receive(element)
+                    lock.withLock { self.demand += newDemand }
+                    await Task.yield()
                 }
-                self.lock.withLock {
-                    self.task = nil
-                }
+                task = nil
             }
         }
 
         func cancel() {
             lock.withLock {
-                performCleanup()
+                task?.cancel()
+                isCancelled = true
             }
         }
 
         deinit {
             lock.withLock {
-                performCleanup()
-            }
-        }
-
-        private func performCleanup() {
-            if !isCancelled {
                 task?.cancel()
                 isCancelled = true
-            }
-            subscriber = nil
-            task = nil
-        }
-
-        private func finishAndCleanUp() {
-            lock.withLock {
-                subscriber?.receive(completion: .finished)
-                subscriber = nil
-                task = nil
             }
         }
     }
@@ -158,11 +132,11 @@ public struct AsyncSequencePublisher<S: AsyncSequence>: Combine.Publisher {
 
 
 public extension Publisher {
-
+    
     @inlinable func filter<A>(_: A.Type = A.self) -> Publishers.CompactMap<Self, A> {
         compactMap{ $0 as? A }
     }
-
+    
     @inlinable func cast<A>(to: A.Type = A.self) -> Publishers.TryMap<Self, A> {
         tryMap { o in
             guard let a = o as? A else {
