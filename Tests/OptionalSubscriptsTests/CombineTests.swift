@@ -96,12 +96,15 @@ final class AsyncSequencePublisherTests: XCTestCase {
             private let expectation: XCTestExpectation
             private let receivedElements: ReceivedElements
 
+            var subscription: Subscription?
+
             init(expectation: XCTestExpectation, receivedElements: ReceivedElements) {
                 self.expectation = expectation
                 self.receivedElements = receivedElements
             }
 
             func receive(subscription: Subscription) {
+                self.subscription = subscription
                 subscription.request(.max(2)) // Request only 2 elements
             }
 
