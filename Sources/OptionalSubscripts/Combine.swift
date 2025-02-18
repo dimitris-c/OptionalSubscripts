@@ -67,7 +67,7 @@ public struct AsyncSequencePublisher<S: AsyncSequence>: Combine.Publisher {
     >: Combine.Subscription where Subscriber.Input == Output, Subscriber.Failure == Failure {
 
         private var sequence: S
-        private var subscriber: Subscriber
+        private var subscriber: Subscriber?
         private var isCancelled = false
 
         private var lock = NSRecursiveLock()
@@ -78,54 +78,65 @@ public struct AsyncSequencePublisher<S: AsyncSequence>: Combine.Publisher {
             self.sequence = sequence
             self.subscriber = subscriber
         }
-//
+
         func request(_ __demand: Subscribers.Demand) {
             precondition(__demand > 0)
-            lock.withLock { demand = __demand }
-            guard task == nil else { return }
-            lock.lock(); defer { lock.unlock() }
-            task = Task { [self] in
-                var iterator = lock.withLock { self.sequence.makeAsyncIterator() }
-                while lock.withLock({ !self.isCancelled && self.demand > 0 }) {
-                    let element: S.Element?
-                    do {
-                        element = try await iterator.next()
-                    } catch is CancellationError {
-                        lock.withLock { self.subscriber }.receive(completion: .finished)
-                        return
-                    } catch let error as Failure {
-                        lock.withLock { self.subscriber }.receive(completion: .failure(error))
-                        throw CancellationError()
-                    } catch {
-//                        assertionFailure("Expected \(Failure.self) but got \(type(of: error))")
-                        throw CancellationError()
+            lock.withLock {
+                demand += __demand
+                // If the task is already running, just update the demand.
+                guard task == nil else { return }
+                // Start the asynchronous iteration.
+                task = Task { [weak self] in
+                    guard let self = self else { return }
+                    var iterator = self.lock.withLock { self.sequence.makeAsyncIterator() }
+                    while true {
+                        // Check if we should continue based on cancellation or available demand.
+                        let shouldContinue = self.lock.withLock { !self.isCancelled && self.demand > 0 }
+                        if !shouldContinue { break }
+                        let element: S.Element?
+                        do {
+                            element = try await iterator.next()
+                        } catch is CancellationError {
+                            self.lock.withLock {
+                                self.subscriber?.receive(completion: .finished)
+                            }
+                            return
+                        } catch {
+                            self.lock.withLock {
+                                self.subscriber?.receive(completion: .finished)
+                            }
+                            return
+                        }
+                        // If the sequence has ended, signal completion.
+                        guard let element = element else {
+                            self.lock.withLock {
+                                self.subscriber?.receive(completion: .finished)
+                            }
+                            return
+                        }
+                        try Task.checkCancellation()
+                        self.lock.withLock { self.demand -= 1 }
+                        // Send the element to the subscriber.
+                        let additionalDemand = self.lock.withLock { self.subscriber?.receive(element) ?? .none }
+                        self.lock.withLock { self.demand += additionalDemand }
+                        await Task.yield()
                     }
-                    guard let element else {
-                        lock.withLock { self.subscriber }.receive(completion: .finished)
-                        throw CancellationError()
-                    }
-                    try Task.checkCancellation()
-                    lock.withLock { self.demand -= 1 }
-                    let newDemand = lock.withLock { self.subscriber }.receive(element)
-                    lock.withLock { self.demand += newDemand }
-                    await Task.yield()
+                    self.lock.withLock { self.task = nil }
                 }
-                task = nil
             }
         }
-//
+
         func cancel() {
             lock.withLock {
-                task?.cancel()
                 isCancelled = true
+                task?.cancel()
+                task = nil
+                subscriber = nil
             }
         }
-//
+
         deinit {
-            lock.withLock {
-                task?.cancel()
-                isCancelled = true
-            }
+            cancel()
         }
     }
 }
